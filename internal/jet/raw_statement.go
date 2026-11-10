@@ -42,3 +42,25 @@ func (s *rawStatementImpl) serialize(statement StatementType, out *SQLBuilder, o
 		out.WriteString(")")
 	}
 }
+
+// IsRawExpression reports whether expr is an expression built with Raw or one of its typed
+// helpers (RawBool, RawInt, RawString, ...). Typed expression wrappers produced, for instance,
+// by StringExp(Raw(...)) are unwrapped before inspecting the underlying serializer.
+//
+// Columns, literals and other library-built expressions (functions, operators, casts, CASE, ...)
+// are not considered raw expressions.
+func IsRawExpression(expr Expression) bool {
+	for expr != nil {
+		switch e := expr.(type) {
+		case *expression:
+			_, ok := e.Serializer.(*rawSerializer)
+			return ok
+		case interface{ wrappedExpression() Expression }:
+			expr = e.wrappedExpression()
+		default:
+			return false
+		}
+	}
+
+	return false
+}

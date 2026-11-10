@@ -149,6 +149,13 @@ func (e *expressionWrapper) serialize(statement StatementType, out *SQLBuilder, 
 	e.expression.serialize(statement, out, options...)
 }
 
+// wrappedExpression returns the expression wrapped by this type wrapper.
+// It is used by expression introspection helpers (e.g. IsRawExpression) and is promoted
+// to every typed expression wrapper (BoolExp, IntExp, StringExp, ...).
+func (e *expressionWrapper) wrappedExpression() Expression {
+	return e.expression
+}
+
 // Representation of binary operations (e.g. comparisons, arithmetic)
 type binaryOperatorSerializer struct {
 	lhs, rhs        Serializer
