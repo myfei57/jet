@@ -28,9 +28,10 @@ func newDialect() jet.Dialect {
 		ArgumentPlaceholder: func(int) string {
 			return "?"
 		},
-		ArgumentToString: argumentToString,
-		ReservedWords:    reservedWords,
-		SerializeOrderBy: serializeOrderBy,
+		ReuseArgumentPlaceholders: false,
+		ArgumentToString:          argumentToString,
+		ReservedWords:             reservedWords,
+		SerializeOrderBy:          serializeOrderBy,
 		ValuesDefaultColumnName: func(index int) string {
 			return fmt.Sprintf("column_%d", index)
 		},

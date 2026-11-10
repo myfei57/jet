@@ -20,6 +20,12 @@ type Statement interface {
 	//   Do not use it in production, as it may lead to security risks such as SQL injection.
 	DebugSql() (query string)
 
+	// Compile freezes the SQL text and the parameter positions of the statement into a
+	// CompiledStatement. The query tree is traversed once; the result can be bound to different
+	// slot values any number of times, including concurrently, without re-serializing the tree.
+	// Compile does not read slot values and does not invoke driver.Valuer.
+	Compile() (CompiledStatement, error)
+
 	// Query delegates call to QueryContext using context.Background() as parameter.
 	Query(db qrm.Queryable, destination interface{}) error
 
@@ -99,40 +105,82 @@ func (s *statementInterfaceImpl) DebugSql() (query string) {
 	return
 }
 
+// Compile serializes the statement once into a frozen SQL string and a parameter plan that records
+// every ordinary literal parameter and every slot occurrence. Subsequent Bind calls resolve values
+// against that plan without touching the query tree.
+func (s *statementInterfaceImpl) Compile() (CompiledStatement, error) {
+	compiler := newSlotCompiler(s.dialect.ReuseArgumentPlaceholders())
+	queryData := &SQLBuilder{Dialect: s.dialect, slotCompiler: compiler}
+
+	s.root.serialize(s.statementType, queryData, NoWrap)
+
+	query, _ := queryData.finalize()
+
+	slots := make([]Slot, len(compiler.slotsInOrder))
+	for i, slot := range compiler.slotsInOrder {
+		slots[i] = slot.expression
+	}
+
+	return &compiledStatement{
+		query:         query,
+		dialect:       s.dialect,
+		statementType: s.statementType,
+		plan:          compiler.plan,
+		slotOrdinals:  compiler.slotOrdinals,
+		slots:         slots,
+	}, nil
+}
+
 func (s *statementInterfaceImpl) Query(db qrm.Queryable, destination interface{}) error {
 	return s.QueryContext(context.Background(), db, destination)
 }
 
 func (s *statementInterfaceImpl) QueryContext(ctx context.Context, db qrm.Queryable, destination interface{}) error {
-	return s.query(ctx, func(query string, args []interface{}) (int64, error) {
-		switch s.statementType {
-		case SelectJsonObjStatementType:
-			return qrm.QueryJsonObj(ctx, db, query, args, destination)
-		case SelectJsonArrStatementType:
-			return qrm.QueryJsonArr(ctx, db, query, args, destination)
-		default:
-			return qrm.Query(ctx, db, query, args, destination)
-		}
-	})
+	return statementQuery(ctx, db, destination, s.statementType, s, s.Sql)
 }
 
-func (s *statementInterfaceImpl) query(
-	ctx context.Context,
-	queryFunc func(query string, args []interface{}) (int64, error),
-) error {
-	query, args := s.Sql()
+func (s *statementInterfaceImpl) Exec(db qrm.Executable) (res sql.Result, err error) {
+	return s.ExecContext(context.Background(), db)
+}
 
-	callLogger(ctx, s)
+func (s *statementInterfaceImpl) ExecContext(ctx context.Context, db qrm.Executable) (res sql.Result, err error) {
+	return statementExec(ctx, db, s, s.Sql)
+}
+
+func (s *statementInterfaceImpl) Rows(ctx context.Context, db qrm.Queryable) (*Rows, error) {
+	return statementRows(ctx, db, s, s.Sql)
+}
+
+// statementQuery contains the shared query execution logic for regular and compiled-and-bound
+// statements. getSql returns the frozen or freshly serialized query and its arguments.
+func statementQuery(
+	ctx context.Context,
+	db qrm.Queryable,
+	destination interface{},
+	statementType StatementType,
+	statement Statement,
+	getSql func() (query string, args []interface{}),
+) error {
+	query, args := getSql()
+
+	callLogger(ctx, statement)
 
 	var rowsProcessed int64
 	var err error
 
 	duration := duration(func() {
-		rowsProcessed, err = queryFunc(query, args)
+		switch statementType {
+		case SelectJsonObjStatementType:
+			rowsProcessed, err = qrm.QueryJsonObj(ctx, db, query, args, destination)
+		case SelectJsonArrStatementType:
+			rowsProcessed, err = qrm.QueryJsonArr(ctx, db, query, args, destination)
+		default:
+			rowsProcessed, err = qrm.Query(ctx, db, query, args, destination)
+		}
 	})
 
 	callQueryLoggerFunc(ctx, QueryInfo{
-		Statement:     s,
+		Statement:     statement,
 		RowsProcessed: rowsProcessed,
 		Duration:      duration,
 		Err:           err,
@@ -141,14 +189,16 @@ func (s *statementInterfaceImpl) query(
 	return err
 }
 
-func (s *statementInterfaceImpl) Exec(db qrm.Executable) (res sql.Result, err error) {
-	return s.ExecContext(context.Background(), db)
-}
+// statementExec contains the shared exec logic for regular and compiled-and-bound statements.
+func statementExec(
+	ctx context.Context,
+	db qrm.Executable,
+	statement Statement,
+	getSql func() (query string, args []interface{}),
+) (res sql.Result, err error) {
+	query, args := getSql()
 
-func (s *statementInterfaceImpl) ExecContext(ctx context.Context, db qrm.Executable) (res sql.Result, err error) {
-	query, args := s.Sql()
-
-	callLogger(ctx, s)
+	callLogger(ctx, statement)
 
 	duration := duration(func() {
 		res, err = db.ExecContext(ctx, query, args...)
@@ -161,7 +211,7 @@ func (s *statementInterfaceImpl) ExecContext(ctx context.Context, db qrm.Executa
 	}
 
 	callQueryLoggerFunc(ctx, QueryInfo{
-		Statement:     s,
+		Statement:     statement,
 		RowsProcessed: rowsAffected,
 		Duration:      duration,
 		Err:           err,
@@ -170,10 +220,16 @@ func (s *statementInterfaceImpl) ExecContext(ctx context.Context, db qrm.Executa
 	return res, err
 }
 
-func (s *statementInterfaceImpl) Rows(ctx context.Context, db qrm.Queryable) (*Rows, error) {
-	query, args := s.Sql()
+// statementRows contains the shared rows logic for regular and compiled-and-bound statements.
+func statementRows(
+	ctx context.Context,
+	db qrm.Queryable,
+	statement Statement,
+	getSql func() (query string, args []interface{}),
+) (*Rows, error) {
+	query, args := getSql()
 
-	callLogger(ctx, s)
+	callLogger(ctx, statement)
 
 	var rows *sql.Rows
 	var err error
@@ -183,7 +239,7 @@ func (s *statementInterfaceImpl) Rows(ctx context.Context, db qrm.Queryable) (*R
 	})
 
 	callQueryLoggerFunc(ctx, QueryInfo{
-		Statement: s,
+		Statement: statement,
 		Duration:  duration,
 		Err:       err,
 	})

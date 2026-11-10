@@ -22,8 +22,9 @@ func newDialect() jet.Dialect {
 		ArgumentPlaceholder: func(ord int) string {
 			return "$" + strconv.Itoa(ord)
 		},
-		ArgumentToString: argumentToString,
-		ReservedWords:    reservedWords,
+		ReuseArgumentPlaceholders: true,
+		ArgumentToString:          argumentToString,
+		ReservedWords:             reservedWords,
 		ValuesDefaultColumnName: func(index int) string {
 			return fmt.Sprintf("column%d", index+1)
 		},

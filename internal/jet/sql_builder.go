@@ -25,6 +25,11 @@ type SQLBuilder struct {
 	ident    int
 
 	Debug bool
+
+	// slotCompiler is non-nil only while a statement is being compiled through Statement.Compile.
+	// When set, parameterized arguments and slot occurrences are recorded into the frozen slot
+	// plan instead of the one-shot Args slice. It is per-serialization state, never a global map.
+	slotCompiler *slotCompiler
 }
 
 const tabSize = 4
@@ -149,10 +154,41 @@ func (s *SQLBuilder) insertParametrizedArgument(arg interface{}) {
 		return
 	}
 
+	if s.slotCompiler != nil {
+		s.slotCompiler.addConstant(s, arg)
+		return
+	}
+
 	s.Args = append(s.Args, arg)
 	argPlaceholder := s.Dialect.ArgumentPlaceholder()(len(s.Args))
 
 	s.WriteString(argPlaceholder)
+}
+
+// registerSlot records a slot occurrence during statement compilation. Slots carry no value, so
+// serializing one outside of a compilation is a clear usage error.
+func (s *SQLBuilder) registerSlot(slot *slotBase) {
+	if s.slotCompiler == nil {
+		panic(fmt.Sprintf(
+			"jet: slot %q has no value outside of Compile/Bind: build the statement once, call Statement.Compile(), then CompiledStatement.Bind(...)",
+			slot.name))
+	}
+
+	s.slotCompiler.addSlot(slot, s)
+}
+
+// insertArgument appends a parameterized argument at the next ordinal and returns its placeholder.
+// During compilation the argument is frozen into the slot plan; otherwise it goes into the
+// one-shot Args slice.
+func (s *SQLBuilder) insertArgument(value interface{}) string {
+	if s.slotCompiler != nil {
+		ordinal := len(s.slotCompiler.plan) + 1
+		s.slotCompiler.plan = append(s.slotCompiler.plan, paramSpec{value: copyParameterBytes(value)})
+		return s.Dialect.ArgumentPlaceholder()(ordinal)
+	}
+
+	s.Args = append(s.Args, value)
+	return s.Dialect.ArgumentPlaceholder()(len(s.Args))
 }
 
 func (s *SQLBuilder) insertRawQuery(raw string, namedArg map[string]interface{}) {
@@ -213,8 +249,7 @@ func (s *SQLBuilder) insertRawQuery(raw string, namedArg map[string]interface{})
 
 		placeholder, exists := placeholders[argument.Name]
 		if !exists || placeholder == "?" {
-			s.Args = append(s.Args, argument.Value)
-			placeholder = s.Dialect.ArgumentPlaceholder()(len(s.Args))
+			placeholder = s.insertArgument(argument.Value)
 			placeholders[argument.Name] = placeholder
 		}
 		if s.Debug {

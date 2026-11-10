@@ -12,6 +12,11 @@ type Dialect interface {
 	AliasQuoteChar() byte
 	IdentifierQuoteChar() byte
 	ArgumentPlaceholder() QueryPlaceholderFunc
+	// ReuseArgumentPlaceholders reports whether the dialect reuses a single placeholder (and a single
+	// argument) when the same parameter occurs more than once in a statement (for example PostgreSQL $1).
+	// Dialects with positional '?' placeholders emit a new placeholder and copy the argument for every
+	// occurrence.
+	ReuseArgumentPlaceholders() bool
 	ArgumentToString(value any) (string, bool)
 	IsReservedWord(name string) bool
 	SerializeOrderBy() func(expression Expression, ascending, nullsFirst *bool) SerializerFunc
@@ -37,12 +42,14 @@ type DialectParams struct {
 	AliasQuoteChar             byte
 	IdentifierQuoteChar        byte
 	ArgumentPlaceholder        QueryPlaceholderFunc
-	ArgumentToString           func(value any) (string, bool)
-	ReservedWords              []string
-	SerializeOrderBy           func(expression Expression, ascending, nullsFirst *bool) SerializerFunc
-	ValuesDefaultColumnName    func(index int) string
-	JsonValueEncode            func(expr Expression) Expression
-	RegexpLike                 func(str StringExpression, not bool, pattern StringExpression, caseSensitive bool) SerializerFunc
+	// ReuseArgumentPlaceholders enables placeholder (and argument) reuse for repeated parameters.
+	ReuseArgumentPlaceholders bool
+	ArgumentToString          func(value any) (string, bool)
+	ReservedWords             []string
+	SerializeOrderBy          func(expression Expression, ascending, nullsFirst *bool) SerializerFunc
+	ValuesDefaultColumnName   func(index int) string
+	JsonValueEncode           func(expr Expression) Expression
+	RegexpLike                func(str StringExpression, not bool, pattern StringExpression, caseSensitive bool) SerializerFunc
 }
 
 // NewDialect creates new dialect with params
@@ -54,6 +61,7 @@ func NewDialect(params DialectParams) Dialect {
 		aliasQuoteChar:             params.AliasQuoteChar,
 		identifierQuoteChar:        params.IdentifierQuoteChar,
 		argumentPlaceholder:        params.ArgumentPlaceholder,
+		reuseArgumentPlaceholders:  params.ReuseArgumentPlaceholders,
 		argumentToString:           params.ArgumentToString,
 		reservedWords:              arrayOfStringsToMapOfStrings(params.ReservedWords),
 		serializeOrderBy:           params.SerializeOrderBy,
@@ -70,6 +78,7 @@ type dialectImpl struct {
 	aliasQuoteChar             byte
 	identifierQuoteChar        byte
 	argumentPlaceholder        QueryPlaceholderFunc
+	reuseArgumentPlaceholders  bool
 	argumentToString           func(value any) (string, bool)
 	reservedWords              map[string]bool
 	serializeOrderBy           func(expression Expression, ascending, nullsFirst *bool) SerializerFunc
@@ -103,6 +112,10 @@ func (d *dialectImpl) IdentifierQuoteChar() byte {
 
 func (d *dialectImpl) ArgumentPlaceholder() QueryPlaceholderFunc {
 	return d.argumentPlaceholder
+}
+
+func (d *dialectImpl) ReuseArgumentPlaceholders() bool {
+	return d.reuseArgumentPlaceholders
 }
 
 func (d *dialectImpl) ArgumentToString(value any) (string, bool) {

@@ -24,8 +24,9 @@ func newDialect() jet.Dialect {
 		ArgumentPlaceholder: func(int) string {
 			return "?"
 		},
-		ArgumentToString: argumentToString,
-		ReservedWords:    reservedWords2,
+		ReuseArgumentPlaceholders: false,
+		ArgumentToString:          argumentToString,
+		ReservedWords:             reservedWords2,
 		ValuesDefaultColumnName: func(index int) string {
 			return fmt.Sprintf("column%d", index+1)
 		},
