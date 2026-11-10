@@ -10,6 +10,8 @@ import (
 // ScanContext  contains information about current row processed, mapping from the row to the
 // destination types and type grouping information.
 type ScanContext struct {
+	config Config
+
 	rowNum                   int64
 	row                      []interface{}
 	uniqueDestObjectsMap     map[string]int
@@ -26,6 +28,18 @@ type ScanContext struct {
 
 // NewScanContext creates new ScanContext from rows
 func NewScanContext(rows *sql.Rows) (*ScanContext, error) {
+	return newScanContext(rows, GlobalConfig, false)
+}
+
+// newScanContext creates a new ScanContext from the rows of the current result set.
+//
+// Every result set has to get its own ScanContext: column aliases, column indexes,
+// primary key grouping, type info and strict scan tracking all depend on the column
+// layout of the current result set and must never be reused from a previous result set.
+//
+// When rejectDuplicateAliases is true, an error is returned if two columns resolve to
+// the same common identifier (ambiguous mapping).
+func newScanContext(rows *sql.Rows, config Config, rejectDuplicateAliases bool) (*ScanContext, error) {
 	aliases, err := rows.Columns()
 
 	if err != nil {
@@ -48,10 +62,19 @@ func NewScanContext(rows *sql.Rows) (*ScanContext, error) {
 			commonIdentifier = concat(commonIdentifier, ".", toCommonIdentifier(names[1]))
 		}
 
+		if rejectDuplicateAliases {
+			if previousIndex, ok := commonIdentToColumnIndex[commonIdentifier]; ok {
+				return nil, fmt.Errorf("jet: ambiguous duplicate column alias '%s' (columns %d '%s' and %d '%s')",
+					commonIdentifier, previousIndex, aliases[previousIndex], i, alias)
+			}
+		}
+
 		commonIdentToColumnIndex[commonIdentifier] = i
 	}
 
 	return &ScanContext{
+		config: config,
+
 		row:                  createScanSlice(len(columnTypes)),
 		uniqueDestObjectsMap: make(map[string]int),
 
@@ -68,11 +91,11 @@ func NewScanContext(rows *sql.Rows) (*ScanContext, error) {
 }
 
 func (s *ScanContext) ensureStrictness() { // can panic
-	if GlobalConfig.StrictScan {
+	if s.config.StrictScan {
 		s.ensureEveryColumnRead() // can panic
 	}
 
-	if GlobalConfig.StrictFieldMapping {
+	if s.config.StrictFieldMapping {
 		s.ensureEveryFieldMapped() // can panic
 	}
 }
@@ -134,8 +157,8 @@ func isOptionalQrmField(field *reflect.StructField) bool {
 	return false
 }
 
-func shouldRecordUnmappedField(parentField *reflect.StructField, field reflect.StructField, fieldMap fieldMapping) bool {
-	if !GlobalConfig.StrictFieldMapping {
+func (s *ScanContext) shouldRecordUnmappedField(parentField *reflect.StructField, field reflect.StructField, fieldMap fieldMapping) bool {
+	if !s.config.StrictFieldMapping {
 		return false
 	}
 	if fieldMap.Type == complexType {
@@ -215,7 +238,7 @@ func (s *ScanContext) getTypeInfo(structType reflect.Type, parentField *reflect.
 			fieldMap.Type = simpleType
 		}
 
-		if shouldRecordUnmappedField(parentField, field, fieldMap) {
+		if s.shouldRecordUnmappedField(parentField, field, fieldMap) {
 			s.recordUnmappedField(structType, parentField, field)
 		}
 
@@ -338,7 +361,7 @@ func (s *ScanContext) typeToColumnIndex(typeName, fieldName string) int {
 // rowElemValue always returns non-ptr value,
 // invalid value is nil
 func (s *ScanContext) rowElemValue(index int) reflect.Value {
-	if s.rowNum == 1 && GlobalConfig.StrictScan {
+	if s.rowNum == 1 && s.config.StrictScan {
 		s.columnIndexRead[index] = true
 	}
 	scannedValue := reflect.ValueOf(s.row[index])

@@ -264,11 +264,31 @@ func queryToSlice(ctx context.Context, db Queryable, query string, args []interf
 		return
 	}
 
-	if len(scanContext.row) == 0 {
-		return
+	rowsProcessed, err = scanRowsToSlice(rows, scanContext, reflect.ValueOf(slicePtr))
+
+	if err != nil {
+		return rowsProcessed, err
 	}
 
-	slicePtrValue := reflect.ValueOf(slicePtr)
+	err = rows.Close()
+
+	if err != nil {
+		return rowsProcessed, err
+	}
+
+	return rowsProcessed, rows.Err()
+}
+
+// scanRowsToSlice maps all rows of the current result set into slicePtrValue,
+// reusing the nested slice grouping and sql.Scanner assignment semantics.
+//
+// The scanContext has to be created for the current result set only. It is safe
+// to call scanRowsToSlice again after rows.NextResultSet() returns true, as long
+// as a fresh scanContext is passed.
+func scanRowsToSlice(rows *sql.Rows, scanContext *ScanContext, slicePtrValue reflect.Value) (rowsProcessed int64, err error) {
+	if len(scanContext.row) == 0 {
+		return 0, nil
+	}
 
 	for rows.Next() {
 		err = rows.Scan(scanContext.row...)
@@ -288,11 +308,6 @@ func queryToSlice(ctx context.Context, db Queryable, query string, args []interf
 		if scanContext.rowNum == 1 {
 			scanContext.ensureStrictness()
 		}
-	}
-
-	err = rows.Close()
-	if err != nil {
-		return scanContext.rowNum, err
 	}
 
 	return scanContext.rowNum, rows.Err()
